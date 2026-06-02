@@ -1,0 +1,124 @@
+from djitellopy import Tello
+import cv2
+import keyboard
+import time
+import numpy as np
+
+tello = Tello()
+tello.connect()
+
+print("Батарея:", tello.get_battery(), "%")
+
+# Включаем видео
+tello.streamon()
+
+frame_read = tello.get_frame_read()
+
+is_flying = False
+speed = 40
+
+while True:
+
+    # ===== КАМЕРА =====
+    frame = frame_read.frame
+
+    if frame is not None:
+
+        # Яркость и контраст
+        frame = cv2.convertScaleAbs(
+            frame,
+            alpha=1.2,
+            beta=15
+        )
+
+        # Уменьшение шума
+        frame = cv2.fastNlMeansDenoisingColored(
+            frame,
+            None,
+            5,
+            5,
+            7,
+            21
+        )
+
+        # Резкость
+        kernel = np.array([
+            [0, -1, 0],
+            [-1, 5, -1],
+            [0, -1, 0]
+        ])
+
+        frame = cv2.filter2D(frame, -1, kernel)
+
+        # Показ видео
+        cv2.imshow("Tello Camera", frame)
+
+    # Нужно для OpenCV
+    cv2.waitKey(1)
+
+    # ===== ВЗЛЁТ =====
+    if keyboard.is_pressed('t'):
+        if not is_flying:
+            tello.takeoff()
+            is_flying = True
+            time.sleep(1)
+
+    # ===== ПОСАДКА =====
+    if keyboard.is_pressed('l'):
+        if is_flying:
+            tello.land()
+            is_flying = False
+            time.sleep(2)
+
+    # ===== ВЫХОД =====
+    if keyboard.is_pressed('esc'):
+        if is_flying:
+            tello.land()
+
+        break
+
+    # ===== УПРАВЛЕНИЕ =====
+    left_right = 0
+    forward_back = 0
+    up_down = 0
+    yaw = 0
+
+    # Вперёд / назад
+    if keyboard.is_pressed('w'):
+        forward_back = speed
+    elif keyboard.is_pressed('s'):
+        forward_back = -speed
+
+    # Влево / вправо
+    if keyboard.is_pressed('a'):
+        left_right = -speed
+    elif keyboard.is_pressed('d'):
+        left_right = speed
+
+    # Вверх / вниз
+    if keyboard.is_pressed('r'):
+        up_down = speed
+    elif keyboard.is_pressed('f'):
+        up_down = -speed
+
+    # Поворот
+    if keyboard.is_pressed('q'):
+        yaw = -speed
+    elif keyboard.is_pressed('e'):
+        yaw = speed
+
+    # Отправка команд
+    if is_flying:
+        tello.send_rc_control(
+            left_right,
+            forward_back,
+            up_down,
+            yaw
+        )
+
+    time.sleep(0.05)
+
+# ===== ЗАВЕРШЕНИЕ =====
+tello.streamoff()
+cv2.destroyAllWindows()
+tello.end()
