@@ -1,0 +1,237 @@
+from djitellopy import Tello
+import cv2
+import mediapipe as mp
+import time
+
+tello = Tello()
+tello.connect()
+
+print("Battery:", tello.get_battery(), "%")
+
+tello.streamon()
+frame_read = tello.get_frame_read()
+
+is_flying = False
+
+cap = cv2.VideoCapture(0)
+
+mp_hands = mp.solutions.hands
+mp_draw = mp.solutions.drawing_utils
+
+speed = 40
+cooldown = 2
+
+last_takeoff = 0
+last_land = 0
+
+recording = False
+video_writer = None
+
+
+def detect_gesture(hand, hand_label):
+    fingers = []
+
+    if hand_label == "Right":
+        thumb_open = hand.landmark[4].x < hand.landmark[3].x
+    else:
+        thumb_open = hand.landmark[4].x > hand.landmark[3].x
+
+    fingers.append(1 if thumb_open else 0)
+
+    tips = [8, 12, 16, 20]
+    for tip in tips:
+        if hand.landmark[tip].y < hand.landmark[tip - 2].y:
+            fingers.append(1)
+        else:
+            fingers.append(0)
+
+    count = fingers.count(1)
+
+    if count == 5:
+        return "TAKEOFF_UP"
+
+    if count == 0:
+        thumb_tip = hand.landmark[4]
+        thumb_base = hand.landmark[2]
+        if thumb_tip.y > thumb_base.y:
+            return "DOWN"
+        return "LAND"
+
+    if fingers == [0, 1, 0, 0, 0]:
+        return "FORWARD"
+
+    if fingers == [0, 1, 1, 0, 0]:
+        return "BACK"
+
+    if fingers == [1, 1, 0, 0, 1]:
+        return "LEFT"
+
+    if fingers == [0, 1, 0, 0, 1]:
+        return "RIGHT"
+
+    return "STOP"
+
+
+hands_model = mp_hands.Hands(
+    max_num_hands=1,
+    min_detection_confidence=0.7,
+    min_tracking_confidence=0.7
+)
+
+while True:
+
+    success, frame = cap.read()
+    if not success:
+        continue
+
+    frame = cv2.flip(frame, 1)
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    results = hands_model.process(rgb)
+
+    gesture = "STOP"
+
+    if results.multi_hand_landmarks:
+        hand = results.multi_hand_landmarks[0]
+        hand_label = results.multi_handedness[0].classification[0].label
+        gesture = detect_gesture(hand, hand_label)
+        mp_draw.draw_landmarks(frame, hand, mp_hands.HAND_CONNECTIONS)
+
+    now = time.time()
+
+    try:
+        if gesture == "TAKEOFF_UP" and not is_flying and now - last_takeoff > cooldown:
+            tello.takeoff()
+            is_flying = True
+            last_takeoff = now
+
+        elif gesture == "LAND" and is_flying and now - last_land > cooldown:
+            tello.land()
+            is_flying = False
+            last_land = now
+
+        elif is_flying:
+            lr, fb, ud, yaw = 0, 0, 0, 0
+
+            if gesture == "TAKEOFF_UP":
+                ud = speed
+            elif gesture == "FORWARD":
+                fb = speed
+            elif gesture == "BACK":
+                fb = -speed
+            elif gesture == "LEFT":
+                lr = -speed
+            elif gesture == "RIGHT":
+                lr = speed
+            elif gesture == "DOWN":
+                ud = -speed
+
+            tello.send_rc_control(lr, fb, ud, yaw)
+
+    except Exception as e:
+        print("Error:", e)
+
+    # --- Окно 1: чистая камера ноутбука ---
+    cv2.imshow("Gesture Control", frame)
+
+    # --- Окно 2: камера дрона со всеми показателями ---
+    tello_frame = frame_read.frame
+    if tello_frame is not None:
+        tello_frame = cv2.resize(tello_frame, (640, 480))
+
+        try:
+            battery = tello.get_battery()
+            height = tello.get_height()
+            speed_x = tello.get_speed_x()
+            speed_y = tello.get_speed_y()
+            speed_z = tello.get_speed_z()
+        except:
+            battery = 0
+            height = 0
+            speed_x = speed_y = speed_z = 0
+
+        status = "FLYING" if is_flying else "LANDED"
+
+        overlay = tello_frame.copy()
+        cv2.rectangle(overlay, (0, 0), (320, 240), (0, 0, 0), -1)
+        cv2.addWeighted(overlay, 0.4, tello_frame, 0.6, 0, tello_frame)
+
+        cv2.putText(tello_frame, f"Battery : {battery}%", (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        cv2.putText(tello_frame, f"Height  : {height} cm", (10, 60),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        cv2.putText(tello_frame, f"Status  : {status}", (10, 90),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+        cv2.putText(tello_frame, f"Gesture : {gesture}", (10, 120),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+        cv2.putText(tello_frame, f"Speed X : {speed_x}", (10, 150),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2)
+        cv2.putText(tello_frame, f"Speed Y : {speed_y}", (10, 180),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2)
+        cv2.putText(tello_frame, f"Speed Z : {speed_z}", (10, 210),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2)
+
+        if recording:
+            cv2.circle(tello_frame, (620, 20), 10, (0, 0, 255), -1)
+            cv2.putText(tello_frame, "REC", (590, 25),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+
+            if video_writer is not None:
+                video_writer.write(tello_frame)
+
+        cv2.imshow("Tello Camera", tello_frame)
+
+    key = cv2.waitKey(1) & 0xFF
+
+    if key == 32:
+        print("Emergency land")
+        try:
+            tello.send_rc_control(0, 0, 0, 0)
+            tello.land()
+        except:
+            pass
+        is_flying = False
+
+    elif key == ord("p"):
+        if tello_frame is not None:
+            filename = f"photo_{int(time.time())}.jpg"
+            cv2.imwrite(filename, tello_frame)
+            print("Saved:", filename)
+
+    elif key == ord("r"):
+        if not recording:
+            filename = f"video_{int(time.time())}.avi"
+            fourcc = cv2.VideoWriter_fourcc(*"XVID")
+            video_writer = cv2.VideoWriter(filename, fourcc, 20, (640, 480))
+            recording = True
+            print("Recording started:", filename)
+        else:
+            recording = False
+            if video_writer:
+                video_writer.release()
+            video_writer = None
+            print("Recording stopped")
+
+    elif key == 27:
+        break
+
+# --- Завершение ---
+hands_model.close()
+
+try:
+    tello.send_rc_control(0, 0, 0, 0)
+    if is_flying:
+        tello.land()
+except:
+    pass
+
+try:
+    tello.streamoff()
+except:
+    pass
+
+if video_writer is not None:
+    video_writer.release()
+
+cap.release()
+cv2.destroyAllWindows()
+tello.end()
