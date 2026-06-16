@@ -1,0 +1,307 @@
+from djitellopy import Tello
+import cv2
+import mediapipe as mp
+import time
+
+# ======================
+# TELLO
+# ======================
+
+tello = Tello()
+tello.connect()
+
+print("Батарея:", tello.get_battery(), "%")
+
+is_flying = False
+
+# ======================
+# CAMERA
+# ======================
+
+cap = cv2.VideoCapture(0)
+
+# ======================
+# MEDIAPIPE
+# ======================
+
+mp_hands = mp.solutions.hands
+mp_draw = mp.solutions.drawing_utils
+
+# ======================
+# SETTINGS
+# ======================
+
+speed = 40
+
+last_takeoff = 0
+last_land = 0
+
+cooldown = 2
+
+with mp_hands.Hands(
+    max_num_hands=1,
+    min_detection_confidence=0.7,
+    min_tracking_confidence=0.7
+) as hands:
+
+    while True:
+
+        success, frame = cap.read()
+
+        if not success:
+            continue
+
+        frame = cv2.flip(frame, 1)
+
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+        results = hands.process(rgb)
+
+        gesture = "STOP"
+
+        if results.multi_hand_landmarks:
+
+            hand = results.multi_hand_landmarks[0]
+
+            hand_label = (
+                results.multi_handedness[0]
+                .classification[0]
+                .label
+            )
+
+            fingers = []
+
+            # Большой палец
+
+            if hand_label == "Right":
+
+                thumb_open = (
+                    hand.landmark[4].x <
+                    hand.landmark[3].x
+                )
+
+            else:
+
+                thumb_open = (
+                    hand.landmark[4].x >
+                    hand.landmark[3].x
+                )
+
+            fingers.append(1 if thumb_open else 0)
+
+            # Остальные пальцы
+
+            tips = [8, 12, 16, 20]
+
+            for tip in tips:
+
+                if (
+                    hand.landmark[tip].y <
+                    hand.landmark[tip - 2].y
+                ):
+                    fingers.append(1)
+
+                else:
+                    fingers.append(0)
+
+            # ======================
+            # ЖЕСТЫ
+            # ======================
+
+            count = fingers.count(1)
+
+            # ✋
+            if count == 5:
+
+                gesture = "TAKEOFF"
+
+            # ✊
+            elif count == 0:
+
+                gesture = "LAND"
+
+            # 👍 / 👎
+            elif fingers == [1, 0, 0, 0, 0]:
+
+                thumb_tip = hand.landmark[4]
+                thumb_base = hand.landmark[2]
+
+                if thumb_tip.y < thumb_base.y:
+
+                    gesture = "UP"
+
+                else:
+
+                    gesture = "DOWN"
+
+            # ☝ 👉 👈
+            elif fingers == [0, 1, 0, 0, 0]:
+
+                tip = hand.landmark[8]
+                base = hand.landmark[5]
+
+                dx = tip.x - base.x
+                dy = tip.y - base.y
+
+                if abs(dx) > abs(dy):
+
+                    if dx > 0:
+
+                        gesture = "RIGHT"
+
+                    else:
+
+                        gesture = "LEFT"
+
+                else:
+
+                    gesture = "FORWARD"
+
+            # ✌
+            elif fingers == [0, 1, 1, 0, 0]:
+
+                gesture = "BACK"
+
+            mp_draw.draw_landmarks(
+                frame,
+                hand,
+                mp_hands.HAND_CONNECTIONS
+            )
+
+        now = time.time()
+
+        try:
+
+            # ======================
+            # ВЗЛЁТ
+            # ======================
+
+            if (
+                gesture == "TAKEOFF"
+                and not is_flying
+                and now - last_takeoff > cooldown
+            ):
+
+                print("ВЗЛЁТ")
+
+                tello.takeoff()
+
+                is_flying = True
+                last_takeoff = now
+
+            # ======================
+            # ПОСАДКА
+            # ======================
+
+            elif (
+                gesture == "LAND"
+                and is_flying
+                and now - last_land > cooldown
+            ):
+
+                print("ПОСАДКА")
+
+                tello.land()
+
+                is_flying = False
+                last_land = now
+
+            # ======================
+            # ДВИЖЕНИЕ
+            # ======================
+
+            elif is_flying:
+
+                lr = 0
+                fb = 0
+                ud = 0
+                yaw = 0
+
+                if gesture == "FORWARD":
+
+                    fb = speed
+
+                elif gesture == "BACK":
+
+                    fb = -speed
+
+                elif gesture == "RIGHT":
+
+                    lr = speed
+
+                elif gesture == "LEFT":
+
+                    lr = -speed
+
+                elif gesture == "UP":
+
+                    ud = speed
+
+                elif gesture == "DOWN":
+
+                    ud = -speed
+
+                tello.send_rc_control(
+                    lr,
+                    fb,
+                    ud,
+                    yaw
+                )
+
+        except Exception as e:
+
+            print("Ошибка:", e)
+
+        cv2.putText(
+            frame,
+            f"Gesture: {gesture}",
+            (20, 50),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1,
+            (0, 255, 0),
+            2
+        )
+
+        cv2.putText(
+            frame,
+            f"Flying: {is_flying}",
+            (20, 90),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (255, 255, 0),
+            2
+        )
+
+        cv2.imshow(
+            "Tello Gesture Control",
+            frame
+        )
+
+        key = cv2.waitKey(1)
+
+        if key == 27:
+            break
+
+# ======================
+# EXIT
+# ======================
+
+try:
+
+    tello.send_rc_control(
+        0,
+        0,
+        0,
+        0
+    )
+
+    if is_flying:
+        tello.land()
+
+except:
+    pass
+
+cap.release()
+cv2.destroyAllWindows()
+
+tello.end()
