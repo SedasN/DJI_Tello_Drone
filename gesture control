@@ -1,0 +1,236 @@
+
+from djitellopy import Tello
+import cv2
+import mediapipe as mp
+import time
+
+# ======================
+# TELLO
+# ======================
+
+tello = Tello()
+tello.connect()
+
+print("Батарея:", tello.get_battery(), "%")
+
+is_flying = False
+
+# ======================
+# MEDIAPIPE
+# ======================
+
+mp_hands = mp.solutions.hands
+mp_draw = mp.solutions.drawing_utils
+
+cap = cv2.VideoCapture(0)
+
+# ======================
+# НАСТРОЙКИ
+# ======================
+
+last_command_time = 0
+command_delay = 4.0      # Пауза после выполнения команды
+
+last_gesture = ""
+gesture_start_time = 0
+gesture_hold_time = 0.8  # Жест нужно удерживать 0.8 сек
+
+with mp_hands.Hands(
+    max_num_hands=1,
+    min_detection_confidence=0.7,
+    min_tracking_confidence=0.7
+) as hands:
+
+    while True:
+
+        success, frame = cap.read()
+
+        if not success:
+            continue
+
+        frame = cv2.flip(frame, 1)
+
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+        results = hands.process(rgb)
+
+        gesture = "NO HAND"
+
+        if results.multi_hand_landmarks:
+
+            for hand in results.multi_hand_landmarks:
+
+                tips = [4, 8, 12, 16, 20]
+
+                fingers = []
+
+                # Большой палец
+                if hand.landmark[4].x < hand.landmark[3].x:
+                    fingers.append(1)
+                else:
+                    fingers.append(0)
+
+                # Остальные пальцы
+                for tip in tips[1:]:
+
+                    if hand.landmark[tip].y < hand.landmark[tip - 2].y:
+                        fingers.append(1)
+                    else:
+                        fingers.append(0)
+
+                count = fingers.count(1)
+
+                if count == 0:
+                    gesture = "FIST"
+
+                elif count == 1:
+                    gesture = "FORWARD"
+
+                elif count == 2:
+                    gesture = "BACK"
+
+                elif count == 3:
+                    gesture = "UP"
+
+                elif count == 4:
+                    gesture = "DOWN"
+
+                elif count == 5:
+                    gesture = "TAKEOFF"
+
+                mp_draw.draw_landmarks(
+                    frame,
+                    hand,
+                    mp_hands.HAND_CONNECTIONS
+                )
+
+        current_time = time.time()
+
+        # ======================
+        # ПОДТВЕРЖДЕНИЕ ЖЕСТА
+        # ======================
+
+        if gesture != last_gesture:
+            last_gesture = gesture
+            gesture_start_time = current_time
+
+        gesture_confirmed = (
+            current_time - gesture_start_time >= gesture_hold_time
+        )
+
+        # ======================
+        # ВЫПОЛНЕНИЕ КОМАНД
+        # ======================
+
+        if (
+            gesture_confirmed and
+            current_time - last_command_time > command_delay
+        ):
+
+            try:
+
+                if gesture == "TAKEOFF" and not is_flying:
+
+                    print("ВЗЛЁТ")
+                    tello.takeoff()
+
+                    is_flying = True
+                    last_command_time = current_time
+                    last_gesture = ""
+
+                elif gesture == "FIST" and is_flying:
+
+                    print("ПОСАДКА")
+                    tello.land()
+
+                    is_flying = False
+                    last_command_time = current_time
+                    last_gesture = ""
+
+                elif is_flying:
+
+                    if gesture == "FORWARD":
+
+                        print("ВПЕРЁД")
+                        tello.move_forward(30)
+
+                        last_command_time = current_time
+                        last_gesture = ""
+
+                    elif gesture == "BACK":
+
+                        print("НАЗАД")
+                        tello.move_back(30)
+
+                        last_command_time = current_time
+                        last_gesture = ""
+
+                    elif gesture == "UP":
+
+                        print("ВВЕРХ")
+                        tello.move_up(30)
+
+                        last_command_time = current_time
+                        last_gesture = ""
+
+                    elif gesture == "DOWN":
+
+                        print("ВНИЗ")
+                        tello.move_down(30)
+
+                        last_command_time = current_time
+                        last_gesture = ""
+
+            except Exception as e:
+                print("Ошибка:", e)
+
+        # ======================
+        # ИНФОРМАЦИЯ НА ЭКРАНЕ
+        # ======================
+
+        cv2.putText(
+            frame,
+            f"Gesture: {gesture}",
+            (20, 50),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1,
+            (0, 255, 0),
+            2
+        )
+
+        if current_time - last_command_time < command_delay:
+            remaining = round(
+                command_delay - (current_time - last_command_time),
+                1
+            )
+
+            cv2.putText(
+                frame,
+                f"Wait: {remaining}s",
+                (20, 90),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                (0, 0, 255),
+                2
+            )
+
+        cv2.imshow("Tello Hand Control", frame)
+
+        key = cv2.waitKey(1)
+
+        if key == 27:  # ESC
+            break
+
+# ======================
+# ЗАВЕРШЕНИЕ
+# ======================
+
+try:
+    if is_flying:
+        tello.land()
+except:
+    pass
+
+cap.release()
+cv2.destroyAllWindows()
+tello.end()
